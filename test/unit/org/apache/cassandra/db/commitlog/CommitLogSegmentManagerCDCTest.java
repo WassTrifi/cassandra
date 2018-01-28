@@ -29,6 +29,7 @@ import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
+import com.sun.org.apache.xml.internal.security.c14n.implementations.Canonicalizer11_OmitComments;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.CQLTester;
 import org.apache.cassandra.db.Keyspace;
@@ -66,6 +67,8 @@ public class CommitLogSegmentManagerCDCTest extends CQLTester
         CommitLogSegmentManagerCDC cdcMgr = (CommitLogSegmentManagerCDC)CommitLog.instance.segmentManager;
         TableMetadata cfm = currentTableMetadata();
 
+        // is there cdc files before upadates ?
+        logger.debug("at this point there is commitlog segements {}",  cdcMgr.getActiveSegments().size());
         // Confirm that logic to check for whether or not we can allocate new CDC segments works
         Integer originalCDCSize = DatabaseDescriptor.getCDCSpaceInMB();
         try
@@ -98,6 +101,10 @@ public class CommitLogSegmentManagerCDCTest extends CQLTester
             CommitLog.instance.forceRecycleAllSegments();
             cdcMgr.awaitManagementTasksCompletion();
             Assert.assertTrue("Expected files to be moved to overflow.", getCDCRawCount() > 0);
+
+            // Read CDC  files from sources for consumer
+            for (File f : new File(DatabaseDescriptor.getCDCLogLocation()).listFiles())
+                logger.debug("a cdc file location from path {}",f.toPath());
 
             // Simulate a CDC consumer reading files then deleting them
             for (File f : new File(DatabaseDescriptor.getCDCLogLocation()).listFiles())
@@ -280,17 +287,20 @@ public class CommitLogSegmentManagerCDCTest extends CQLTester
         TableMetadata ccfm = Keyspace.open(keyspace()).getColumnFamilyStore(table_name).metadata();
         try
         {
+
             for (int i = 0; i < 1000; i++)
             {
                 new RowUpdateBuilder(ccfm, 0, i)
                     .add("data", randomizeBuffer(DatabaseDescriptor.getCommitLogSegmentSize() / 3))
                     .build().apply();
             }
+
             Assert.fail("Expected CDCWriteException from full CDC but did not receive it.");
         }
         catch (CDCWriteException e)
         {
             // pass
+            logger.debug("We got the execption {}", e.getMessage());
         }
 
         CommitLog.instance.sync(true);
@@ -298,6 +308,8 @@ public class CommitLogSegmentManagerCDCTest extends CQLTester
 
         // Build up a list of expected index files after replay and then clear out cdc_raw
         List<CDCIndexData> oldData = parseCDCIndexData();
+
+
         for (File f : new File(DatabaseDescriptor.getCDCLogLocation()).listFiles())
             FileUtils.deleteWithConfirm(f.getAbsolutePath());
 
@@ -316,6 +328,11 @@ public class CommitLogSegmentManagerCDCTest extends CQLTester
         }
         CDCTestReplayer replayer = new CDCTestReplayer();
         replayer.examineCommitLog();
+
+        logger.debug("get the position  {}",CommitLog.instance.getCurrentPosition());
+
+        CommitLogReader reader = replayer.commitLogReader;
+        logger.debug("the reader used is {}", reader);
 
         // Rough sanity check -> should be files there now.
         Assert.assertTrue("Expected non-zero number of files in CDC folder after restart.",
